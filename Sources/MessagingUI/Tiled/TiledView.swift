@@ -430,11 +430,16 @@ final class _TiledView<
     let deltaBottom = uiEdgeInsets.bottom - oldAdditionalBottom
 
     guard deltaBottom != 0 else {
-      // Just apply without animation if no change
+      // Just apply without animation if no change to the bottom inset.
       tiledLayout.additionalContentInset = uiEdgeInsets
       // With .never, scroll indicators need manual safe area adjustment
       collectionView.verticalScrollIndicatorInsets.top = uiEdgeInsets.top
       collectionView.verticalScrollIndicatorInsets.bottom = uiEdgeInsets.bottom
+      // Invalidate so prepare() re-runs on the next layoutIfNeeded() call. This is
+      // necessary when only the top inset changes (e.g. topContentInset update): without
+      // invalidation, calculateContentInset() never re-runs and contentOffset stays at
+      // the stale value, producing a large animated jump when the next item is added.
+      tiledLayout.invalidateLayout()
       return
     }
 
@@ -491,6 +496,7 @@ final class _TiledView<
   private var storageMap: [Item.ID: CellStateStorage<StateValue>] = [:]
   
   private var pendingActionsOnLayoutSubviews: [() -> Void] = []
+  private var hasNotifiedInitialGeometry = false
 
   typealias DataSource = ListDataSource<Item>
 
@@ -640,7 +646,26 @@ final class _TiledView<
   
   override func layoutSubviews() {
     super.layoutSubviews()
-    
+
+    // The first time we get valid bounds, re-notify geometry. `applyContentInsets()`
+    // fires early when bounds are still zero, so any consumer that initialises layout
+    // from `onTiledScrollGeometryChange` (e.g. topContentInset) sees visibleSize=.zero
+    // and computes wrong values. Now that bounds are real we broadcast the true geometry.
+    //
+    // We call `collectionView.layoutIfNeeded()` first so that `calculateContentInset()`
+    // has run and `collectionView.adjustedContentInset` reflects the actual insets —
+    // otherwise `notifyScrollGeometry()` would read stale zero insets and report a
+    // completely wrong `actualContentHeight` to the consumer.
+    if !hasNotifiedInitialGeometry, !bounds.size.isEmpty {
+      hasNotifiedInitialGeometry = true
+      // Force the collection view's own layout (which runs prepare() → calculateContentInset())
+      // without any outer animation context so the contentOffset snap is never animated.
+      UIView.performWithoutAnimation {
+        collectionView.layoutIfNeeded()
+      }
+      notifyScrollGeometry()
+    }
+
     // Execute any pending actions after layout
     let actions = pendingActionsOnLayoutSubviews
     pendingActionsOnLayoutSubviews.removeAll()
